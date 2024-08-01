@@ -1,134 +1,86 @@
 import numpy as np
 import pandas as pd
-from sklearn.datasets import load_iris
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.datasets import fetch_openml
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
-from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
 
-# Load Iris dataset
-iris = load_iris()
-X_train, X_test, y_train, y_test = train_test_split(iris.data, iris.target, test_size=0.2, random_state=42)
-scaler = StandardScaler().fit(X_train)
-X_train = scaler.transform(X_train)
-X_test = scaler.transform(X_test)
-
-Train_df = pd.DataFrame(np.column_stack([X_train, y_train]), columns=iris.feature_names + ['target'])
-
-# select initial centroids using k-means clustering
-def kmeans_initial_centroids(X, n_clusters=6):
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init='auto').fit(X)
-    return kmeans.cluster_centers_
-
-# Experiment with different numbers of initial centroids
-num_centroids = 6
-initial_centroids = kmeans_initial_centroids(X_train, n_clusters=num_centroids)
-
-# RBF Kernel
 def rbf_kernel(x, c, gamma=0.1):
-    return np.exp(-gamma * np.linalg.norm(x - c)**2)
+    return np.exp(-gamma * np.linalg.norm(x - c) ** 2)
 
-# Projects the data X into a new space defined by the RBF kernel with respect to the centroids.
 def initial_projection(X, centroids, gamma=0.1):
-    M = len(centroids)
-    projection = np.zeros((X.shape[0], M))
-    for i, x in enumerate(X):
-        for j, c in enumerate(centroids):
-            projection[i, j] = rbf_kernel(x, c, gamma)
-    return projection
+    return np.array([[rbf_kernel(x, c, gamma) for c in centroids] for x in X])
 
-# weighted least squares support vector classifier
 class WLS_SVC:
-    def __init__(self, C=1.0):
+    def __init__(self, C=1.0, max_iter=100, tol=1e-2, learning_rate=0.001):
         self.C = C
-        self.alpha = None
-        self.w = None
-        self.b = 0
+        self.max_iter = max_iter
+        self.tol = tol
+        self.learning_rate = learning_rate
     
     def fit(self, X_proj, y):
         l, M = X_proj.shape
-        self.alpha = np.zeros(l)
         self.w = np.zeros(M)
         self.b = 0
-
-        for _ in range(10):
-            for i in range(l):
-                e_i = y[i] - (X_proj[i] @ self.w + self.b)
-                a_i = 2 * self.alpha[i] * y[i] / (1 + y[i] * (X_proj[i] @ self.w + self.b))
-                self.w += a_i * y[i] * X_proj[i]
-                self.b += a_i * y[i]
-                self.alpha[i] = min(max(self.alpha[i] + e_i, 0), self.C)
+        y = y.astype(np.float64)
+        
+        for iteration in range(self.max_iter):
+            margins = y * (np.dot(X_proj, self.w) + self.b)
+            loss = 1 - margins
+            loss[loss < 0] = 0
+            hinge_loss = self.C * np.mean(loss)
+            
+            grad_w = self.w - self.C * np.dot((loss > 0) * y, X_proj) / l
+            grad_b = -self.C * np.mean((loss > 0) * y)
+            
+            if np.linalg.norm(grad_w) < self.tol and abs(grad_b) < self.tol:
+                print(f"Converged after {iteration + 1} iterations")
+                break
+            
+            self.w -= self.learning_rate * grad_w
+            self.b -= self.learning_rate * grad_b
+        
+        else:
+            print(f"Did not converge after {self.max_iter} iterations")
     
     def predict(self, X):
-        if X.shape[1] != self.w.shape[0]:
-            raise ValueError(f"Dimension mismatch: X.shape[1]={X.shape[1]}, self.w.shape[0]={self.w.shape[0]}")
-        return np.sign(X @ self.w + self.b)
+        return np.sign(np.dot(X, self.w) + self.b).astype(int)
 
 def find_new_centroids(X, y, model, centroids, gamma=0.1):
     X_proj = initial_projection(X, centroids, gamma)
-    #print(f"X_proj shape: {X_proj.shape}")
-
     predictions = model.predict(X_proj)
-    support_vectors = X[np.abs(y - predictions) > 0.1]
-    #print(f"Support vectors shape: {support_vectors.shape}")
+    errors = np.abs(y - predictions) > 0.1
+    return X[errors]
 
-    return support_vectors
-
-def iterative_poker(X, y, initial_centroids, iterations=10, gamma=0.1):
+def iterative_poker(X, y, initial_centroids, max_iterations=10, gamma=0.1):
     centroids = initial_centroids
-    wls_svc = WLS_SVC(C=1.0)
+    wls_svc = WLS_SVC(C=1.0, learning_rate=0.0001)  # Reduced learning rate
     
-    for iteration in range(iterations):
+    for iteration in range(max_iterations):
         projection = initial_projection(X, centroids, gamma)
-        #print(f"Iteration {iteration} projection shape: {projection.shape}")
         wls_svc.fit(projection, y)
         
         new_centroids = find_new_centroids(X, y, wls_svc, centroids, gamma)
-
         if len(new_centroids) == 0:
+            print(f"No new centroids found after {iteration + 1} iterations")
             break
         
-        total_centroids = np.vstack([centroids, new_centroids])
-        centroids = total_centroids[:initial_centroids.shape[0] + 10]
-        #print(f"Updated centroids shape: {centroids.shape}")
-
+        centroids = np.vstack([centroids, new_centroids])[:initial_centroids.shape[0] + 10]
+    
     return wls_svc, centroids
-
-X_train_ = Train_df[iris.feature_names].values
-y_train_ = Train_df['target'].values
-y_train_ = 2 * y_train_ - 1
-y_test_ = 2 * y_test - 1
-
-poker_model, final_centroids = iterative_poker(X_train_, y_train_, initial_centroids)
-#print(f"Final centroids shape: {final_centroids.shape}")
-
-poker_projection = initial_projection(X_test, final_centroids)
-#print(f"Test projection shape: {poker_projection.shape}")
-
-if poker_projection.shape[1] != poker_model.w.shape[0]:
-    raise ValueError(f"Dimension mismatch: poker_projection.shape[1]={poker_projection.shape[1]}, poker_model.w.shape[0]={poker_model.w.shape[0]}")
-
-poker_predictions = poker_model.predict(poker_projection)
-poker_accuracy = accuracy_score(y_test_, poker_predictions)
-
-svm_model = SVC(kernel='rbf')
-svm_model.fit(X_train_, y_train_)
-svm_predictions = svm_model.predict(X_test)
-svm_accuracy = accuracy_score(y_test_, svm_predictions)
-
-print(f"POKER Accuracy: {poker_accuracy}")
-print(f"SVM Accuracy: {svm_accuracy}")
 
 def experiment_with_centroids(X_train, y_train, X_test, y_test, num_centroids_list, gamma=0.1):
     results = []
     for num_centroids in num_centroids_list:
-        initial_centroids = kmeans_initial_centroids(X_train, n_clusters=num_centroids)
+        kmeans = KMeans(n_clusters=num_centroids, random_state=42, n_init=10).fit(X_train)
+        initial_centroids = kmeans.cluster_centers_
+        
         poker_model, final_centroids = iterative_poker(X_train, y_train, initial_centroids, gamma=gamma)
         poker_projection = initial_projection(X_test, final_centroids, gamma=gamma)
-        
-        if poker_projection.shape[1] != poker_model.w.shape[0]:
-            raise ValueError(f"Dimension mismatch: poker_projection.shape[1]={poker_projection.shape[1]}, poker_model.w.shape[0]={poker_model.w.shape[0]}")
         
         poker_predictions = poker_model.predict(poker_projection)
         poker_accuracy = accuracy_score(y_test, poker_predictions)
@@ -137,8 +89,100 @@ def experiment_with_centroids(X_train, y_train, X_test, y_test, num_centroids_li
     
     return results
 
-num_centroids_list = [4, 6, 8, 10, 12]
-experiment_results = experiment_with_centroids(X_train_, y_train_, X_test, y_test_, num_centroids_list)
+def visualize_features(X, y, centroids, model, gamma=0.1):
+    X_proj = initial_projection(X, centroids, gamma)
+    phi_plus = np.sum([w * X_proj[:, i] for i, w in enumerate(model.w) if w > 0], axis=0)
+    phi_minus = np.sum([w * X_proj[:, i] for i, w in enumerate(model.w) if w < 0], axis=0)
+    
+    if np.isscalar(phi_plus) or np.isscalar(phi_minus):
+        print("phi_plus or phi_minus is scalar, skipping plot")
+        return
+    
+    plt.figure(figsize=(10, 8))
+    plt.scatter(phi_plus[y == 1], phi_minus[y == 1], c='b', label='Class 1')
+    plt.scatter(phi_plus[y == -1], phi_minus[y == -1], c='r', label='Class -1')
+    plt.xlabel('φ+')
+    plt.ylabel('φ-')
+    plt.legend()
+    plt.title('Projection onto (φ+, φ-) space')
+    plt.show()
 
-for num_centroids, acc in experiment_results:
-    print(f"Num centroids: {num_centroids}, POKER Accuracy: {acc}")
+def visualize_decision_boundary(X, y, centroids, model, gamma=0.1):
+    if X.shape[1] != 2:
+        print("Decision boundary visualization is only available for 2D input space.")
+        return
+    
+    x_min, x_max = X[:, 0].min() - 1, X[:, 0].max() + 1
+    y_min, y_max = X[:, 1].min() - 1, X[:, 1].max() + 1
+    xx, yy = np.meshgrid(np.arange(x_min, x_max, 0.1),
+                         np.arange(y_min, y_max, 0.1))
+    
+    X_mesh = np.c_[xx.ravel(), yy.ravel()]
+    X_proj = initial_projection(X_mesh, centroids, gamma)
+    Z = model.predict(X_proj)
+    Z = Z.reshape(xx.shape)
+    
+    plt.figure(figsize=(10, 8))
+    plt.contourf(xx, yy, Z, alpha=0.4)
+    plt.scatter(X[:, 0], X[:, 1], c=y, alpha=0.8)
+    plt.xlabel('Feature 1')
+    plt.ylabel('Feature 2')
+    plt.title('Decision Boundary')
+    plt.show()
+
+# Load datasets
+datasets = {
+    'abalone': ('abalone', 'target'),
+    'image': ('segment', 'class'),
+    'pima': ('diabetes', 'class'),
+    'waveform': ('waveform-5000', 'class')
+}
+
+results_list = []
+
+for dataset_name, (data_name, target_name) in datasets.items():
+    print(f"Processing dataset: {dataset_name}")
+    
+    try:
+        # Load data
+        data = fetch_openml(name=data_name, version=1, as_frame=True, parser='auto')
+        X, y = data.data, data.target
+        
+        # Convert to binary classification if needed
+        if dataset_name in ['abalone', 'image', 'waveform']:
+            y = (y == y.unique()[0]).astype(int) * 2 - 1
+        
+        # Preprocess data
+        numeric_features = X.select_dtypes(include=[np.number]).columns.tolist()
+        categorical_features = X.select_dtypes(include=[object]).columns.tolist()
+        
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ('num', StandardScaler(), numeric_features),
+                ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
+            ]
+        )
+        
+        X = preprocessor.fit_transform(X)
+        
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+        
+        # Experiment with different numbers of centroids
+        num_centroids_list = [5, 10, 20]
+        results = experiment_with_centroids(X_train, y_train, X_test, y_test, num_centroids_list)
+        
+        for num_centroids, accuracy in results:
+            results_list.append({
+                "dataset": dataset_name,
+                "num_centroids": num_centroids,
+                "accuracy": accuracy
+            })
+    
+    except Exception as e:
+        print(f"An error occurred while processing {dataset_name}: {e}")
+
+# Convert results list to DataFrame
+results_df = pd.DataFrame(results_list)
+
+# Save results to a CSV file
+results_df.to_csv('poker_results.csv', index=False)
