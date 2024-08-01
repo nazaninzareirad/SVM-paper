@@ -8,6 +8,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
 
 def rbf_kernel(x, c, gamma=0.1):
     return np.exp(-gamma * np.linalg.norm(x - c) ** 2)
@@ -73,7 +74,35 @@ def iterative_poker(X, y, initial_centroids, max_iterations=10, gamma=0.1):
     
     return wls_svc, centroids
 
-def experiment_with_centroids(X_train, y_train, X_test, y_test, num_centroids_list, gamma=0.1):
+
+def visualize_features(X, y, centroids, model, gamma=0.1):
+    X_proj = initial_projection(X, centroids, gamma)
+    phi_plus = np.sum([w * X_proj[:, i] for i, w in enumerate(model.w) if w > 0], axis=0)
+    phi_minus = np.sum([w * X_proj[:, i] for i, w in enumerate(model.w) if w < 0], axis=0)
+    #phi_plus = np.atleast_2d(phi_plus)
+    #phi_minus = np.atleast_2d(phi_minus)
+    #if np.isscalar(phi_plus) or np.isscalar(phi_minus):
+    #    print("phi_plus or phi_minus is scalar, skipping plot")
+    #    return
+    if np.isscalar(phi_plus):
+        #phi_plus = np.array([phi_plus])
+        phi_plus = np.atleast_2d(phi_plus)
+    if np.isscalar(phi_minus):
+        #phi_minus = np.array([phi_minus])
+        phi_minus = np.atleast_2d(phi_minus)
+    
+    plt.figure(figsize=(10, 8))
+    
+    plt.scatter(phi_plus[y == 1], phi_minus[y == 1], c='b', label='Class 1')
+    plt.scatter(phi_plus[y == -1], phi_minus[y == -1], c='r', label='Class -1')
+    plt.xlabel('φ+')
+    plt.ylabel('φ-')
+    plt.legend()
+    plt.title('Projection onto (φ+, φ-) space')
+    plt.show()
+
+
+def experiment_with_centroids(X_train, y_train, X_test, y_test, num_centroids_list, gamma=0.2):
     results = []
     for num_centroids in num_centroids_list:
         kmeans = KMeans(n_clusters=num_centroids, random_state=42, n_init=10).fit(X_train)
@@ -86,49 +115,14 @@ def experiment_with_centroids(X_train, y_train, X_test, y_test, num_centroids_li
         poker_accuracy = accuracy_score(y_test, poker_predictions)
         results.append((num_centroids, poker_accuracy))
         print(f"Num centroids: {num_centroids}, POKER Accuracy: {poker_accuracy}")
+        print("here")
+        visualize_features(X , y , final_centroids , poker_model , gamma=0.2)
+        print("herr2")
+
     
     return results
 
-def visualize_features(X, y, centroids, model, gamma=0.1):
-    X_proj = initial_projection(X, centroids, gamma)
-    phi_plus = np.sum([w * X_proj[:, i] for i, w in enumerate(model.w) if w > 0], axis=0)
-    phi_minus = np.sum([w * X_proj[:, i] for i, w in enumerate(model.w) if w < 0], axis=0)
-    
-    if np.isscalar(phi_plus) or np.isscalar(phi_minus):
-        print("phi_plus or phi_minus is scalar, skipping plot")
-        return
-    
-    plt.figure(figsize=(10, 8))
-    plt.scatter(phi_plus[y == 1], phi_minus[y == 1], c='b', label='Class 1')
-    plt.scatter(phi_plus[y == -1], phi_minus[y == -1], c='r', label='Class -1')
-    plt.xlabel('φ+')
-    plt.ylabel('φ-')
-    plt.legend()
-    plt.title('Projection onto (φ+, φ-) space')
-    plt.show()
 
-def visualize_decision_boundary(X, y, centroids, model, gamma=0.1):
-    if X.shape[1] != 2:
-        print("Decision boundary visualization is only available for 2D input space.")
-        return
-    
-    x_min, x_max = X[:, 0].min() - 1, X[:, 0].max() + 1
-    y_min, y_max = X[:, 1].min() - 1, X[:, 1].max() + 1
-    xx, yy = np.meshgrid(np.arange(x_min, x_max, 0.1),
-                         np.arange(y_min, y_max, 0.1))
-    
-    X_mesh = np.c_[xx.ravel(), yy.ravel()]
-    X_proj = initial_projection(X_mesh, centroids, gamma)
-    Z = model.predict(X_proj)
-    Z = Z.reshape(xx.shape)
-    
-    plt.figure(figsize=(10, 8))
-    plt.contourf(xx, yy, Z, alpha=0.4)
-    plt.scatter(X[:, 0], X[:, 1], c=y, alpha=0.8)
-    plt.xlabel('Feature 1')
-    plt.ylabel('Feature 2')
-    plt.title('Decision Boundary')
-    plt.show()
 
 # Load datasets
 datasets = {
@@ -147,7 +141,6 @@ for dataset_name, (data_name, target_name) in datasets.items():
         # Load data
         data = fetch_openml(name=data_name, version=1, as_frame=True, parser='auto')
         X, y = data.data, data.target
-        
         # Convert to binary classification if needed
         if dataset_name in ['abalone', 'image', 'waveform']:
             y = (y == y.unique()[0]).astype(int) * 2 - 1
