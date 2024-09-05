@@ -159,6 +159,7 @@ for dataset_name, (data_name, target_name) in datasets.items():
         X, y = data.data, data.target
         
         # convert to binary if needed
+        # change this
         if dataset_name in ['abalone', 'image', 'waveform']:
             y = (y == y.unique()[0]).astype(int) * 2 - 1
         
